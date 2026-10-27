@@ -2,15 +2,13 @@ import os
 import json
 import uuid
 from typing import List, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, status
-from fastapi.concurrency import run_in_threadpool
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File, Form, status
 from sqlalchemy.orm import Session
 from backend.database import get_db
 from backend.models.complaint import Complaint
 from backend.routers.auth import get_current_user
 from backend.models.user import User
-from backend.services.complaint_service import process_new_complaint
-from backend.services.pothole_detector import detect_potholes
+from backend.services.complaint_service import process_new_complaint, verify_live_detection
 
 router = APIRouter()
 
@@ -19,6 +17,7 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 @router.post("", status_code=status.HTTP_201_CREATED)
 async def create_complaint(
+    background_tasks: BackgroundTasks,
     description: str = Form(...),
     latitude: float = Form(...),
     longitude: float = Form(...),
@@ -45,14 +44,6 @@ async def create_complaint(
             first_image_bytes = content
         saved_images.append(f"/uploads/{filename}")
 
-    # Re-verify live camera detections server-side rather than trusting the client
-    camera_detection = None
-    if live_detection and first_image_bytes:
-        try:
-            camera_detection = await run_in_threadpool(detect_potholes, first_image_bytes)
-        except OSError:
-            raise HTTPException(status_code=400, detail="Invalid image")
-
     complaint = process_new_complaint(
         db=db,
         user_id=current_user.id,
@@ -61,9 +52,13 @@ async def create_complaint(
         lat=latitude,
         lon=longitude,
         location_source=location_source,
-        captured_at=captured_at,
-        camera_detection=camera_detection
+        captured_at=captured_at
     )
+
+    # Re-verify the on-device detection server-side rather than trusting the
+    # client. Runs after the response: inference is slow on small CPU hosts.
+    if live_detection and first_image_bytes:
+        background_tasks.add_task(verify_live_detection, complaint.id, first_image_bytes)
 
     return {
         "ticket_id": complaint.ticket_id,

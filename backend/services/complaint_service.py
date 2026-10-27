@@ -7,18 +7,14 @@ from backend.services.routing import get_department
 from backend.services.priority import calculate_priority, boost_priority
 from backend.services.deduplication import find_master_ticket
 from sqlalchemy.orm import Session
+from backend.database import SessionLocal
+from backend.services.pothole_detector import detect_potholes
 
-def process_new_complaint(db: Session, user_id: str, description: str, images: list[str], lat: float, lon: float, location_source: str, captured_at: str | None = None, camera_detection: dict | None = None) -> Complaint:
+def process_new_complaint(db: Session, user_id: str, description: str, images: list[str], lat: float, lon: float, location_source: str, captured_at: str | None = None) -> Complaint:
     # 1. AI Analysis — classify from user description (+ image path for future use)
     img_path = images[0] if images else None
     ai_result = analyze_complaint(description=description, image_path=img_path)
 
-    # Live camera pothole detection overrides the text classifier
-    if camera_detection and camera_detection.get("detected"):
-        ai_result["category"] = "pothole"
-        ai_result["severity"] = 3
-        ai_result["description"] = "Detected: a road surface pothole (live camera)."
-        ai_result["camera_detection"] = camera_detection
     if captured_at:
         ai_result["captured_at"] = captured_at
 
@@ -97,3 +93,37 @@ def process_new_complaint(db: Session, user_id: str, description: str, images: l
     db.commit()
     db.refresh(complaint)
     return complaint
+
+
+def verify_live_detection(complaint_id: str, image_bytes: bytes) -> None:
+    """Background task: confirm a live-camera pothole report with the server model.
+
+    A confirmed detection overrides the text classifier (pothole, severity 3,
+    BBMP Roads); the result is stored in ai_analysis either way so admins can
+    see whether the on-device detection held up.
+    """
+    try:
+        detection = detect_potholes(image_bytes)
+    except Exception as exc:
+        print(f"[verify_live_detection] {complaint_id}: detection failed: {exc}")
+        return
+
+    db = SessionLocal()
+    try:
+        complaint = db.query(Complaint).filter(Complaint.id == complaint_id).first()
+        if not complaint:
+            return
+        ai_result = json.loads(complaint.ai_analysis)
+        ai_result["camera_detection"] = detection
+        ai_result["camera_detection_verified"] = detection["detected"]
+        if detection["detected"]:
+            ai_result["category"] = "pothole"
+            ai_result["severity"] = 3
+            ai_result["description"] = "Detected: a road surface pothole (live camera)."
+            complaint.category = "pothole"
+            complaint.severity = 3
+            complaint.department = get_department("pothole")
+        complaint.ai_analysis = json.dumps(ai_result)
+        db.commit()
+    finally:
+        db.close()
