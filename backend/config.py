@@ -8,8 +8,8 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     DATABASE_URL: str = "sqlite:///./janasutra.db"
-    POTHOLE_MODEL_PATH: str = "backend/ml_models/pothole_yolov8s.onnx"
-    POTHOLE_CONF_THRESHOLD: float = 0.5
+    POTHOLE_MODEL_PATH: str = "backend/ml_models/pothole.onnx"
+    POTHOLE_CONF_THRESHOLD: float = 0.2
     # Comma-separated list of allowed browser origins, or "*"
     CORS_ORIGINS: str = "*"
     # Seeded account passwords — override via env in any public deployment
