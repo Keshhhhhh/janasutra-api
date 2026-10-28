@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 from backend.config import settings
+from backend.utils.images import open_rgb
 from backend.services.pothole_detector import NMS_IOU_THRESHOLD, _letterbox, _nms
 
 class Detector:
@@ -63,7 +64,7 @@ def _detect(detector: Detector, image_bytes: bytes) -> dict | None:
     """
     session, cfg = detector.load()
     classes = cfg["classes"]
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image = open_rgb(image_bytes)
     width, height = image.size
     tensor, scale, pad_x, pad_y = _letterbox(image)
     # output0: (1, 4 box + one score per class, anchors)

@@ -14,6 +14,7 @@ import numpy as np
 from PIL import Image
 
 from backend.config import settings
+from backend.utils.images import open_rgb
 
 _state = {}
 _lock = threading.Lock()
@@ -52,7 +53,7 @@ def classify_scene(image_bytes: bytes) -> dict | None:
         return None
     st = _load()
     cfg = st["cfg"]
-    v = st["sess"].run(None, {"pixels": _preprocess(Image.open(io.BytesIO(image_bytes)).convert("RGB"), cfg)})[0][0]
+    v = st["sess"].run(None, {"pixels": _preprocess(open_rgb(image_bytes), cfg)})[0][0]
     z = cfg["logitScale"] * st["text"] @ v
     p = np.exp(z - z.max())
     p /= p.sum()

@@ -24,6 +24,7 @@ import numpy as np
 from PIL import Image, ExifTags
 
 from backend.config import settings
+from backend.utils.images import open_rgb
 
 CLASSES = ["real", "ai_generated", "screen_photo"]
 CROP = 256
@@ -120,7 +121,7 @@ def classify(image_bytes: bytes) -> dict | None:
     session = _get_session()
     if session is None:
         return None
-    img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    img = open_rgb(image_bytes)
     logits = session.run(None, {session.get_inputs()[0].name: _crops(img)})[0]
     e = np.exp(logits - logits.max(1, keepdims=True))
     probs = (e / e.sum(1, keepdims=True)).mean(0)

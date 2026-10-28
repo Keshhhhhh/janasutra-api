@@ -17,6 +17,7 @@ import numpy as np
 from PIL import Image
 
 from backend.config import settings
+from backend.utils.images import open_rgb
 
 INPUT_SIZE = 640
 NMS_IOU_THRESHOLD = 0.7  # Ultralytics default
@@ -97,7 +98,7 @@ def detect_potholes(image_bytes: bytes) -> dict:
             "threshold": float
         }
     """
-    image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    image = open_rgb(image_bytes)
     width, height = image.size
     threshold = settings.POTHOLE_CONF_THRESHOLD
 
