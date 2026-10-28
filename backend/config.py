@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./janasutra.db"
     POTHOLE_MODEL_PATH: str = "backend/ml_models/pothole.onnx"
     POTHOLE_CONF_THRESHOLD: float = 0.2
+    # Dashcam road-damage model (pothole / cracks / faded markings); optional
+    ROAD_DAMAGE_MODEL_PATH: str = "backend/ml_models/road_damage.onnx"
+    ROAD_DAMAGE_CONFIG_PATH: str = "backend/ml_models/road_damage.json"
     AUTHENTICITY_MODEL_PATH: str = "backend/ml_models/authenticity.onnx"
     AUTHENTICITY_THRESHOLD: float = 0.761  # from training/runs/authenticity/eval_report.json (<=3% false flags on real val photos)
     # ── Civic AI pipeline (backend/ai) ──────────────────────────────────

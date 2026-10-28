@@ -81,8 +81,9 @@ def classify(image: ImageAnalysis, text: TextAnalysis, fusion: Fusion,
     tax_version = knowledge.taxonomy()["version"]
     img = _image_scores(image)
     txt = {c.subcategory_id: c.score for c in text.candidates}
-    det = {p.subcategory_id for p in image.problems if p.source == EvidenceSource.pothole_detector}
-    vlm = {p.subcategory_id for p in image.problems if p.source == EvidenceSource.image_vlm}
+    found_by = {}
+    for p in image.problems:
+        found_by.setdefault(p.subcategory_id, set()).add(p.source)
 
     # Combined score: average of the evidence that exists; agreement between
     # image and text raises the score, a one-sided claim is capped lower.
@@ -98,11 +99,8 @@ def classify(image: ImageAnalysis, text: TextAnalysis, fusion: Fusion,
             score = t * (0.6 if fusion.consistency in (Consistency.contradiction, Consistency.unrelated_image,
                                                        Consistency.insufficient_image_evidence) else 0.9)
         combined[sid] = round(score, 3)
-        src = []
-        if sid in vlm:
-            src.append(EvidenceSource.image_vlm)
-        if sid in det:
-            src.append(EvidenceSource.pothole_detector)
+        src = [s for s in (EvidenceSource.image_vlm, EvidenceSource.pothole_detector,
+                           EvidenceSource.road_damage_detector) if s in found_by.get(sid, ())]
         if t is not None:
             src.append(EvidenceSource.text)
         sources[sid] = src

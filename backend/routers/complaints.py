@@ -30,6 +30,8 @@ async def create_complaint(
     live_detection: bool = Form(False),
     # From the AI review step (POST /api/ai/analyze); all optional
     analysis_id: Optional[str] = Form(None),
+    # Dashcam mode: JSON {speed_kmh, nearby_detections, track_frames, detector_class}
+    dashcam_evidence: Optional[str] = Form(None),
     confirmed_subcategory_id: Optional[str] = Form(None),
     confirmed_authority_id: Optional[str] = Form(None),
     complaint_text: Optional[str] = Form(None),
@@ -84,6 +86,7 @@ async def create_complaint(
             confirmed_subcategory=confirmed_subcategory_id,
             confirmed_authority_id=confirmed_authority_id,
             submitted_draft=complaint_text,
+            dashcam=parse_dashcam(dashcam_evidence),
         )
     except OutOfScopeComplaint as exc:
         _remove_uploads(saved_images)
@@ -119,6 +122,23 @@ async def create_complaint(
         "department_basis": civic.get("submission", {}).get("department_basis"),
         "message": "Complaint registered successfully"
     }
+
+
+def parse_dashcam(raw: Optional[str]) -> Optional[dict]:
+    """Validate the device-reported dashcam evidence (used only for urgency)."""
+    if not raw:
+        return None
+    try:
+        d = json.loads(raw)
+        out = {
+            "speed_kmh": None if d.get("speed_kmh") is None else min(max(float(d["speed_kmh"]), 0.0), 200.0),
+            "nearby_detections": None if d.get("nearby_detections") is None else min(max(int(d["nearby_detections"]), 0), 100),
+            "track_frames": None if d.get("track_frames") is None else min(max(int(d["track_frames"]), 0), 10000),
+            "detector_class": str(d["detector_class"])[:40] if d.get("detector_class") else None,
+        }
+    except (ValueError, TypeError, AttributeError):
+        raise HTTPException(status_code=400, detail="Invalid dashcam_evidence")
+    return out
 
 
 def _remove_uploads(paths: list[str]):

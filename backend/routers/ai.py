@@ -15,6 +15,8 @@ from backend.ai.routing_engine import CitizenLocation
 from backend.config import settings
 from backend.models.user import User
 from backend.routers.auth import get_current_user
+from backend.routers.complaints import parse_dashcam
+from backend.services.priority import assess_priority
 
 router = APIRouter()
 
@@ -39,6 +41,8 @@ def analyze_complaint_draft(
     draft_language: str = Form("en"),
     live_detection: bool = Form(False),
     analysis_id: Optional[str] = Form(None),
+    # Dashcam mode: JSON {speed_kmh, nearby_detections, track_frames, detector_class}
+    dashcam_evidence: Optional[str] = Form(None),
     current_user: User = Depends(get_current_user),
 ):
     # Sync endpoint: FastAPI runs it in the threadpool, so slow local inference
@@ -71,7 +75,12 @@ def analyze_complaint_draft(
                      live_flags=[live_detection and i == 0 for i in range(len(image_bytes))],
                      image_refs=[img.filename or f"photo_{i + 1}" for i, img in enumerate(images)] or None,
                      prior=prior)
-    return result.model_dump(mode="json")
+    out = result.model_dump(mode="json")
+    # Priority preview (the same rule the submission uses)
+    sev = result.classification.severity or (knowledge.subcategory(result.classification.subcategory_id) or {}).get("severity", 2)
+    out["priority_preview"] = assess_priority(sev, result.classification.subcategory_id,
+                                              result.image_analysis.detector, parse_dashcam(dashcam_evidence))
+    return out
 
 
 @router.get("/taxonomy")

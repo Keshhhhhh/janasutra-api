@@ -199,6 +199,25 @@ def _parse(text: str) -> dict:
     return data
 
 
+def road_damage_problems(road: dict | None) -> list[VisualProblem]:
+    """One visual problem per taxonomy subcategory the road-damage detector found."""
+    by_sub = {}
+    for d in (road or {}).get("detections", []):
+        by_sub.setdefault(d["subcategory_id"], []).append(d)
+    problems = []
+    for sid, ds in sorted(by_sub.items()):
+        if not knowledge.subcategory(sid):
+            continue
+        counts = {}
+        for d in ds:
+            counts[d["label_en"]] = counts.get(d["label_en"], 0) + 1
+        problems.append(VisualProblem(
+            subcategory_id=sid, source=EvidenceSource.road_damage_detector,
+            confidence=max(d["confidence"] for d in ds),
+            evidence="Road-damage detector found " + ", ".join(f"{n} {l.lower()}" for l, n in counts.items())))
+    return problems
+
+
 def analyze_images(images: list[bytes], detector_results: list[dict | None] | None = None,
                    use_vlm: bool = True) -> ImageAnalysis:
     """Analyze the first image with the VLM (plus pothole-detector evidence for all images).
@@ -217,6 +236,7 @@ def analyze_images(images: list[bytes], detector_results: list[dict | None] | No
             confidence=round(float(detector["max_confidence"]), 3),
             evidence=f"Pothole detector found {detector['count']} pothole(s), max confidence "
                      f"{detector['max_confidence']:.2f}"))
+    det_problems += road_damage_problems((detector or {}).get("road_damage"))
 
     try:
         img = open_image(images[0])
@@ -230,7 +250,7 @@ def analyze_images(images: list[bytes], detector_results: list[dict | None] | No
     except ModelUnavailable as exc:
         return ImageAnalysis(status=StageStatus.model_unavailable, images_analyzed=0, detector=detector,
                              problems=det_problems, error=str(exc),
-                             warnings=["Image understanding unavailable; only the pothole detector ran."])
+                             warnings=["Image understanding unavailable; only the road detectors ran."])
 
     messages = [{"role": "user", "content": [{"type": "image", "image": img}, {"type": "text", "text": _prompt()}]}]
     data, last_err, raw = None, None, ""

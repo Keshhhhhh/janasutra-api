@@ -52,13 +52,23 @@ def _authenticity(images: list[bytes], live_flags: list[bool]) -> dict | None:
 
 
 def _detector(images: list[bytes]) -> list[dict | None]:
+    """Pothole detector per image, with the road-damage detector's output (when
+    that model is installed) under "road_damage"."""
     from backend.services.pothole_detector import detect_potholes
+    from backend.services.road_damage_detector import detect_road_damage
     out = []
     for data in images:
         try:
-            out.append(detect_potholes(data))
+            d = detect_potholes(data)
         except Exception:
-            out.append(None)
+            d = None
+        try:
+            road = detect_road_damage(data)
+        except Exception as exc:
+            road = {"error": f"{type(exc).__name__}: {exc}"}
+        if road is not None:
+            d = {**(d or {"detected": False, "count": 0, "boxes": []}), "road_damage": road}
+        out.append(d)
     return out
 
 
@@ -96,7 +106,7 @@ def analyze(images: list[bytes], text: str, citizen: CitizenLocation | None = No
             text_result = timed("text_understanding", analyze_text, text)
     else:
         authenticity = timed("authenticity", _authenticity, images, live_flags) if run_detectors else None
-        detections = timed("pothole_detector", _detector, images) if images and run_detectors else []
+        detections = timed("detectors", _detector, images) if images and run_detectors else []
         image = timed("image_understanding", vision.analyze_images, images, detections, use_vlm=run_vlm)
 
         translation = None

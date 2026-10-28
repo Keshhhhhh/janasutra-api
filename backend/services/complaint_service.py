@@ -3,7 +3,7 @@ import uuid
 from backend.models.complaint import Complaint
 from backend.models.master_ticket import MasterTicket
 from backend.services.ai_service import analyze_complaint
-from backend.services.priority import calculate_priority, boost_priority
+from backend.services.priority import assess_priority, boost_priority
 from backend.services.deduplication import find_master_ticket
 from sqlalchemy.orm import Session
 from backend.database import SessionLocal
@@ -17,7 +17,7 @@ def process_new_complaint(db: Session, user_id: str, description: str, images: l
                           location_source: str, captured_at: str | None = None, image_bytes: list[bytes] | None = None,
                           citizen: CitizenLocation | None = None, analysis_id: str | None = None,
                           confirmed_subcategory: str | None = None, confirmed_authority_id: str | None = None,
-                          submitted_draft: str | None = None) -> Complaint:
+                          submitted_draft: str | None = None, dashcam: dict | None = None) -> Complaint:
     # 1-2. Civic AI: classification (taxonomy) and routing (authority registry).
     # Raises OutOfScopeComplaint / ValueError before anything is stored.
     citizen = citizen or CitizenLocation(lat=lat, lon=lon)
@@ -35,10 +35,14 @@ def process_new_complaint(db: Session, user_id: str, description: str, images: l
     if ai_result["civic_ai"].get("authenticity"):
         ai_result["authenticity"] = ai_result["civic_ai"]["authenticity"]
     
-    # 3. Priority Calculation
-    # Assuming urgency is 2 by default, can be tweaked
-    urgency = 2
-    priority = calculate_priority(urgency, severity)
+    # 3. Priority: ITIL matrix of taxonomy severity and evidence-based urgency
+    civic = ai_result["civic_ai"]
+    basis = assess_priority(severity, civic.get("classification", {}).get("subcategory_id"),
+                            civic.get("image_analysis", {}).get("detector"), dashcam)
+    if dashcam:
+        ai_result["dashcam"] = dashcam
+    ai_result["priority_basis"] = basis
+    urgency, priority = basis["urgency"], basis["priority"]
     
     # 4. Deduplication
     master_ticket = find_master_ticket(db, description, lat, lon, category)
