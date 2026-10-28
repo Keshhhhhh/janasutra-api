@@ -1,6 +1,6 @@
 {
   "lexicon_id": "janasutra-civic-lexicon",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "notes": "Lower-case match terms per subcategory. 'en' = English, 'kn' = Kannada script, 'tl' = Kannada transliterated in Latin script (as typed on phones). Terms are matched as substrings on normalised text (Kannada) or word-prefix regexes (Latin). Hand-compiled; extend from reviewed complaints, never from unreviewed submissions. Assets often used as landmarks (bus stop, park, school) require a defect word; matches inside 'near X' phrases are down-weighted by the matcher. 'suppresses': when the key subcategory matches, the listed generic readings are down-weighted (x0.3).",
   "subcategories": {
     "ROAD.POTHOLE": {
@@ -297,7 +297,10 @@
         "debris dumped",
         "construction waste",
         "illegal dumping",
-        "black spot"
+        "black spot",
+        "construction debris",
+        "rubble",
+        "debris on the road"
       ],
       "kn": [
         "ಕಸ ಸುರಿಯುತ್ತಿದ್ದಾರೆ",

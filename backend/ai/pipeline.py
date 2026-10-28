@@ -68,6 +68,13 @@ def _detector(images: list[bytes]) -> list[dict | None]:
             road = {"error": f"{type(exc).__name__}: {exc}"}
         if road is not None:
             d = {**(d or {"detected": False, "count": 0, "boxes": []}), "road_damage": road}
+        try:
+            from backend.services.civic_scene import classify_scene
+            scene = classify_scene(data)
+        except Exception as exc:
+            scene = {"error": f"{type(exc).__name__}: {exc}"}
+        if scene is not None:
+            d = {**(d or {"detected": False, "count": 0, "boxes": []}), "scene": scene}
         out.append(d)
     return out
 

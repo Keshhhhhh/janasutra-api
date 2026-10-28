@@ -4,11 +4,13 @@ FROM python:3.12-slim
 RUN useradd -m -u 1000 user
 USER user
 # AI_VLM_ENABLED=false: 512 MB cannot hold the local VLM, so the civic AI
-# pipeline runs the lexicon + ONNX detectors only (see backend/ai/README.md)
+# pipeline runs the lexicon + ONNX detectors only (see backend/ai/README.md).
+# CIVIC_SCENE_ENABLED=false: the CLIP scene model (~150 MB more) runs on the phone instead
 ENV HOME=/home/user \
     PATH=/home/user/.local/bin:$PATH \
     PYTHONUNBUFFERED=1 \
     AI_VLM_ENABLED=false \
+    CIVIC_SCENE_ENABLED=false \
     AI_STRICT_OFFLINE=true
 WORKDIR /home/user/app
 

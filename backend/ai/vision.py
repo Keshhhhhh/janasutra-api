@@ -237,6 +237,12 @@ def analyze_images(images: list[bytes], detector_results: list[dict | None] | No
             evidence=f"Pothole detector found {detector['count']} pothole(s), max confidence "
                      f"{detector['max_confidence']:.2f}"))
     det_problems += road_damage_problems((detector or {}).get("road_damage"))
+    for issue in ((detector or {}).get("scene") or {}).get("issues", []):
+        if knowledge.subcategory(issue["subcategory_id"]):
+            det_problems.append(VisualProblem(
+                subcategory_id=issue["subcategory_id"], source=EvidenceSource.scene_classifier,
+                confidence=issue["probability"],
+                evidence=f"Scene classifier: {issue['label_en'].lower()} ({issue['probability']:.0%})"))
 
     try:
         img = open_image(images[0])

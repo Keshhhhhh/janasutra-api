@@ -20,31 +20,38 @@ from PIL import Image
 from backend.config import settings
 from backend.services.pothole_detector import NMS_IOU_THRESHOLD, _letterbox, _nms
 
-_session = None
-_config = None
-_lock = threading.Lock()
+class Detector:
+    """A multi-class YOLO ONNX model plus its JSON config (classes, thresholds, taxonomy map)."""
+
+    def __init__(self, model_path: str, config_path: str):
+        self.model_path, self.config_path = model_path, config_path
+        self._session = self._config = None
+        self._lock = threading.Lock()
+
+    def available(self) -> bool:
+        return os.path.exists(self.model_path) and os.path.exists(self.config_path)
+
+    def load(self):
+        if self._session is None:
+            with self._lock:
+                if self._session is None:
+                    import onnxruntime as ort
+                    self._config = json.load(open(self.config_path))
+                    self._session = ort.InferenceSession(self.model_path, providers=["CPUExecutionProvider"])
+        return self._session, self._config
+
+    def detect(self, image_bytes: bytes) -> dict | None:
+        return _detect(self, image_bytes) if self.available() else None
 
 
-def available() -> bool:
-    return os.path.exists(settings.ROAD_DAMAGE_MODEL_PATH) and os.path.exists(settings.ROAD_DAMAGE_CONFIG_PATH)
-
-
-def _load():
-    global _session, _config
-    if _session is None:
-        with _lock:
-            if _session is None:
-                import onnxruntime as ort
-                _config = json.load(open(settings.ROAD_DAMAGE_CONFIG_PATH))
-                _session = ort.InferenceSession(settings.ROAD_DAMAGE_MODEL_PATH, providers=["CPUExecutionProvider"])
-    return _session, _config
-
-
-def config() -> dict | None:
-    return _load()[1] if available() else None
+road_damage = Detector(settings.ROAD_DAMAGE_MODEL_PATH, settings.ROAD_DAMAGE_CONFIG_PATH)
 
 
 def detect_road_damage(image_bytes: bytes) -> dict | None:
+    return road_damage.detect(image_bytes)
+
+
+def _detect(detector: Detector, image_bytes: bytes) -> dict | None:
     """
     Returns None when the model is not installed, else
         {
@@ -54,9 +61,7 @@ def detect_road_damage(image_bytes: bytes) -> dict | None:
             "model": str,
         }
     """
-    if not available():
-        return None
-    session, cfg = _load()
+    session, cfg = detector.load()
     classes = cfg["classes"]
     image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     width, height = image.size
@@ -92,4 +97,4 @@ def detect_road_damage(image_bytes: bytes) -> dict | None:
             })
     detections.sort(key=lambda d: d["confidence"], reverse=True)
     return {"detected": bool(detections), "count": len(detections), "detections": detections,
-            "model": os.path.basename(settings.ROAD_DAMAGE_MODEL_PATH)}
+            "model": os.path.basename(detector.model_path)}
