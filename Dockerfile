@@ -3,9 +3,13 @@ FROM python:3.12-slim
 
 RUN useradd -m -u 1000 user
 USER user
+# AI_VLM_ENABLED=false: 512 MB cannot hold the local VLM, so the civic AI
+# pipeline runs the lexicon + ONNX detectors only (see backend/ai/README.md)
 ENV HOME=/home/user \
     PATH=/home/user/.local/bin:$PATH \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    AI_VLM_ENABLED=false \
+    AI_STRICT_OFFLINE=true
 WORKDIR /home/user/app
 
 COPY --chown=user requirements.txt .

@@ -9,6 +9,9 @@ from backend.models.complaint import Complaint
 from backend.routers.auth import get_current_user
 from backend.models.user import User
 from backend.services.complaint_service import process_new_complaint, verify_live_detection, verify_authenticity
+from backend.services.ai_service import OutOfScopeComplaint
+from backend.ai import knowledge
+from backend.ai.routing_engine import CitizenLocation
 
 router = APIRouter()
 
@@ -25,11 +28,28 @@ async def create_complaint(
     images: List[UploadFile] = File(...),
     captured_at: Optional[str] = Form(None),
     live_detection: bool = Form(False),
+    # From the AI review step (POST /api/ai/analyze); all optional
+    analysis_id: Optional[str] = Form(None),
+    confirmed_subcategory_id: Optional[str] = Form(None),
+    confirmed_authority_id: Optional[str] = Form(None),
+    complaint_text: Optional[str] = Form(None),
+    locality: Optional[str] = Form(None),
+    city: Optional[str] = Form(None),
+    district: Optional[str] = Form(None),
+    pin_code: Optional[str] = Form(None),
+    rural: Optional[bool] = Form(None),
+    city_corporation_id: Optional[str] = Form(None),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
     if len(images) > 5:
         raise HTTPException(status_code=400, detail="Maximum 5 images allowed")
+    if confirmed_subcategory_id and (not knowledge.subcategory(confirmed_subcategory_id)
+                                     or confirmed_subcategory_id.startswith("OUT_OF_SCOPE.")):
+        raise HTTPException(status_code=400, detail=f"Unknown subcategory {confirmed_subcategory_id}")
+    for aid in (confirmed_authority_id, city_corporation_id):
+        if aid and not knowledge.authority(aid):
+            raise HTTPException(status_code=400, detail=f"Unknown authority {aid}")
 
     saved_images = []
     image_bytes = []
@@ -46,27 +66,45 @@ async def create_complaint(
         image_bytes.append(content)
         saved_images.append(f"/uploads/{filename}")
 
-    complaint = process_new_complaint(
-        db=db,
-        user_id=current_user.id,
-        description=description,
-        images=saved_images,
-        lat=latitude,
-        lon=longitude,
-        location_source=location_source,
-        captured_at=captured_at
-    )
+    citizen = CitizenLocation(locality=locality, city=city, district=district, pin_code=pin_code, rural=rural,
+                              city_corporation_id=city_corporation_id, lat=latitude, lon=longitude)
+    try:
+        complaint = process_new_complaint(
+            db=db,
+            user_id=current_user.id,
+            description=description,
+            images=saved_images,
+            lat=latitude,
+            lon=longitude,
+            location_source=location_source,
+            captured_at=captured_at,
+            image_bytes=image_bytes,
+            citizen=citizen,
+            analysis_id=analysis_id,
+            confirmed_subcategory=confirmed_subcategory_id,
+            confirmed_authority_id=confirmed_authority_id,
+            submitted_draft=complaint_text,
+        )
+    except OutOfScopeComplaint as exc:
+        _remove_uploads(saved_images)
+        raise HTTPException(status_code=422, detail={"code": "out_of_scope", "message": str(exc)})
+    except ValueError as exc:
+        _remove_uploads(saved_images)
+        raise HTTPException(status_code=400, detail=str(exc))
 
+    civic = json.loads(complaint.ai_analysis).get("civic_ai", {})
     # Re-verify the on-device detection server-side rather than trusting the
     # client. Runs after the response: inference is slow on small CPU hosts.
     if live_detection and first_image_bytes:
         background_tasks.add_task(verify_live_detection, complaint.id, first_image_bytes)
     # Real vs AI-generated / photo-of-a-screen / downloaded. Flags for admin
     # review; never blocks. The first image of a live scan came from the camera.
-    background_tasks.add_task(
-        verify_authenticity, complaint.id,
-        [(content, live_detection and i == 0) for i, content in enumerate(image_bytes)],
-    )
+    # Skipped when the reviewed analysis already ran the same detector.
+    if not (civic.get("authenticity") or {}).get("status") == "ok":
+        background_tasks.add_task(
+            verify_authenticity, complaint.id,
+            [(content, live_detection and i == 0) for i, content in enumerate(image_bytes)],
+        )
 
     return {
         "ticket_id": complaint.ticket_id,
@@ -75,8 +113,20 @@ async def create_complaint(
         "priority": complaint.priority,
         "status": complaint.status,
         "master_ticket_id": complaint.master_ticket_id,
+        "subcategory_id": civic.get("classification", {}).get("subcategory_id"),
+        "authority_id": civic.get("submission", {}).get("authority_id"),
+        "routing_status": civic.get("routing", {}).get("status"),
+        "department_basis": civic.get("submission", {}).get("department_basis"),
         "message": "Complaint registered successfully"
     }
+
+
+def _remove_uploads(paths: list[str]):
+    for p in paths:
+        try:
+            os.remove(os.path.join(UPLOAD_DIR, os.path.basename(p)))
+        except OSError:
+            pass
 
 @router.get("/track/{ticket_id}")
 def track_complaint(ticket_id: str, db: Session = Depends(get_db)):

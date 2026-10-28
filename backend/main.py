@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 from backend.database import engine, Base, seed_data
 from backend.config import settings
-from backend.routers import auth, complaints, admin, detect
+from backend.routers import auth, complaints, admin, detect, ai
 from backend.services.pothole_detector import warm_up_model
 
 @asynccontextmanager
@@ -44,6 +44,7 @@ app.include_router(auth.router, prefix=f"{settings.API_V1_STR}/auth", tags=["aut
 app.include_router(complaints.router, prefix=f"{settings.API_V1_STR}/complaints", tags=["complaints"])
 app.include_router(admin.router, prefix=f"{settings.API_V1_STR}/admin", tags=["admin"])
 app.include_router(detect.router, prefix=f"{settings.API_V1_STR}/detect", tags=["detect"])
+app.include_router(ai.router, prefix=f"{settings.API_V1_STR}/ai", tags=["ai"])
 
 if __name__ == "__main__":
     import uvicorn

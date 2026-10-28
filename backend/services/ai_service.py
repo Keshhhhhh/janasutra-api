@@ -1,151 +1,113 @@
 """
-AI Service — Pluggable analysis module for JanaSutra.
-
-Current: Smart keyword-based classification from user description text.
-Future:  Swap in Gemini API or custom-trained model by replacing
-         analyze_complaint() internals. The function signature stays the same.
+AI Service: connects complaint submission to the civic AI pipeline
+(backend/ai). The pipeline classifies against the versioned taxonomy and
+routes through the verified authority registry; this module maps that result
+onto the legacy complaint columns (category / severity / department) and keeps
+the full structured result in ai_analysis["civic_ai"].
 """
 
-import random
 import re
+import zlib
+
+from backend.ai import knowledge, pipeline
+from backend.ai.routing_engine import CitizenLocation
+from backend.ai.schema import AnalysisResult, RoutingStatus
+
+PENDING_AUTHORITY = "Pending authority confirmation"
 
 
-# ── Keyword rules: ordered by specificity (most specific first) ──────────
-# Each rule: (category, severity, list_of_keyword_patterns)
-# Patterns are compiled as case-insensitive regex
-
-CLASSIFICATION_RULES = [
-    # Roads
-    ("pothole",        3, [r"\bpothole", r"\bpot\s*hole", r"\bpit\b.*road", r"\bcrater\b.*road"]),
-    ("road_damage",    2, [r"\broad\s*(damage|crack|broken|break|crumble|deteriorat|cave|sink)",
-                           r"\bcrack\b.*road", r"\bbroken\s*road", r"\basphalt",
-                           r"\broad\b.*crack", r"\broad\b.*crumbl", r"\broad\b.*broken",
-                           r"\bpave?ment\b.*broken", r"\btarring", r"\bspeed\s*breaker\b.*broken"]),
-
-    # Water & Drainage
-    ("water_leak",     2, [r"\bwater\s*leak", r"\bleak\b.*pipe", r"\bleak\b.*water",
-                           r"\bburst\b.*pipe", r"\bpipe\s*burst", r"\bwater\s*pipe\b.*broken",
-                           r"\bflooding", r"\bwater\s*log"]),
-    ("drainage",       2, [r"\bdrain", r"\bmanhole", r"\bstorm\s*water", r"\bclog",
-                           r"\bblock\b.*drain", r"\boverflow\b.*drain"]),
-    ("sewage",         3, [r"\bsewage", r"\bsewer", r"\bseptic", r"\bwaste\s*water\b.*overflow"]),
-
-    # Electricity
-    ("streetlight",    1, [r"\bstreet\s*light", r"\bstreetlight", r"\blamp\s*post",
-                           r"\blight\s*pole", r"\blight\b.*not\s*work", r"\bno\s*light",
-                           r"\bdark\s*road", r"\bbulb\b.*fused?\b", r"\bbulb\b.*broken"]),
-    ("electricity",    2, [r"\belectric", r"\bpower\s*cut", r"\btransformer",
-                           r"\bwire\b.*hang", r"\bwire\b.*dang", r"\bspark",
-                           r"\bshort\s*circuit", r"\bpower\s*line"]),
-
-    # Waste
-    ("garbage",        2, [r"\bgarbage", r"\btrash", r"\brubbish", r"\bwaste\b(?!\s*water)",
-                           r"\bdump", r"\blitter", r"\brefuse\b.*pile", r"\bdebris",
-                           r"\bdirty\b", r"\bfoul\s*smell", r"\bstink", r"\bstench"]),
-    ("waste",          1, [r"\bwaste\b", r"\bbio\s*waste", r"\brecycl"]),
-
-    # Trees & Green
-    ("tree_fall",      3, [r"\btree\b.*fall", r"\btree\b.*block", r"\bfallen\s*tree",
-                           r"\buprooted", r"\bbranch\b.*fall", r"\bbranch\b.*block",
-                           r"\btree\b.*danger", r"\btree\b.*lean"]),
-
-    # Traffic
-    ("traffic_signal", 2, [r"\btraffic\s*signal", r"\btraffic\s*light", r"\bsignal\b.*not\s*work",
-                           r"\bred\s*light\b.*broken", r"\bsignal\b.*broken",
-                           r"\btraffic\s*sign"]),
-]
-
-# Pre-compile patterns
-_COMPILED_RULES = []
-for cat, sev, patterns in CLASSIFICATION_RULES:
-    compiled = [re.compile(p, re.IGNORECASE) for p in patterns]
-    _COMPILED_RULES.append((cat, sev, compiled))
+class OutOfScopeComplaint(ValueError):
+    """The request is not a civic infrastructure complaint (e.g. a personal dispute)."""
 
 
-def classify_text(description: str) -> tuple[str, int]:
-    """
-    Classify a complaint description into (category, severity).
-    Uses keyword matching with priority ordering.
-    Returns ('other', 2) if no pattern matches.
-    """
-    if not description:
-        return ("other", 2)
-
-    text = description.lower().strip()
-
-    # Score each category: count how many patterns match
-    best_cat = "other"
-    best_sev = 2
-    best_score = 0
-
-    for cat, sev, compiled_patterns in _COMPILED_RULES:
-        score = sum(1 for p in compiled_patterns if p.search(text))
-        if score > best_score:
-            best_score = score
-            best_cat = cat
-            best_sev = sev
-
-    return (best_cat, best_sev)
+def _department(result: AnalysisResult, confirmed_authority_id: str | None,
+                citizen: CitizenLocation) -> tuple[str, str | None, str]:
+    """(department label, authority_id, basis). The registry, not the model, names the authority."""
+    routing = result.routing
+    if confirmed_authority_id:
+        suggested = {routing.authority_id} | {a.authority_id for a in routing.alternatives}
+        sub = result.classification.subcategory_id
+        if confirmed_authority_id not in suggested and not knowledge.handles(confirmed_authority_id, sub):
+            raise ValueError(f"Authority {confirmed_authority_id} does not handle {sub}")
+        return knowledge.authority(confirmed_authority_id)["official_name"], confirmed_authority_id, "citizen_confirmed"
+    if routing.authority_id and routing.status in (RoutingStatus.resolved, RoutingStatus.confirmation_required,
+                                                   RoutingStatus.authority_not_configured):
+        if routing.status == RoutingStatus.resolved:
+            basis = "registry"
+        elif routing.authority_id in (citizen.city_corporation_id, citizen.asset_owner_id):
+            basis = "citizen_confirmed"
+        else:
+            basis = "registry_unconfirmed"
+        return routing.authority_name, routing.authority_id, basis
+    return PENDING_AUTHORITY, None, "unresolved"
 
 
-def analyze_complaint(description: str, image_path: str = None) -> dict:
-    """
-    Analyze a complaint using its text description (and optionally image).
+def analyze_complaint(description: str, images: list[bytes] | None = None, citizen: CitizenLocation | None = None,
+                      analysis_id: str | None = None, confirmed_subcategory: str | None = None,
+                      confirmed_authority_id: str | None = None, submitted_draft: str | None = None) -> dict:
+    """Classify and route a complaint being submitted.
 
-    Current implementation: keyword-based classification.
-    Future: replace internals with Gemini API call or custom CNN+NLP model.
+    Reuses the citizen's reviewed analysis (analysis_id from POST /api/ai/analyze)
+    when it is still cached, re-running only classification and routing with the
+    citizen's confirmations. Otherwise runs the text stages now; the photo
+    detectors run afterwards as background tasks.
 
-    Returns:
-        {
-            "category": str,       # e.g. "pothole", "garbage", "water_leak"
-            "severity": int,       # 1 (low), 2 (medium), 3 (high)
-            "description": str,    # AI-generated summary
-            "is_authentic": bool   # forgery detection result
-        }
-    """
-    category, severity = classify_text(description)
+    Raises OutOfScopeComplaint for requests the platform should not file, and
+    ValueError for an authority that does not handle the confirmed problem."""
+    images = images or []
+    citizen = citizen or CitizenLocation()
+    prior = pipeline.cached(analysis_id)
+    result = pipeline.analyze(images, description, citizen, confirmed_subcategory=confirmed_subcategory,
+                              run_vlm=False, run_detectors=False, prior=prior)
+    if result.classification.out_of_scope:
+        raise OutOfScopeComplaint(result.classification.out_of_scope_reason or "Not a civic infrastructure problem")
 
-    # Generate a contextual AI description
-    category_labels = {
-        "pothole": "a road surface pothole",
-        "road_damage": "damaged road infrastructure",
-        "water_leak": "a water supply leak or pipe issue",
-        "drainage": "a drainage or stormwater blockage",
-        "sewage": "a sewage overflow or contamination issue",
-        "streetlight": "a non-functional or damaged streetlight",
-        "electricity": "an electrical infrastructure issue",
-        "garbage": "illegal waste dumping or garbage accumulation",
-        "waste": "improper waste disposal",
-        "tree_fall": "a fallen or dangerous tree",
-        "traffic_signal": "a malfunctioning traffic signal",
-        "other": "a civic issue requiring attention",
+    department, authority_id, basis = _department(result, confirmed_authority_id, citizen)
+    sub = knowledge.subcategory(result.classification.subcategory_id)
+    civic = result.model_dump(mode="json")
+    civic["submission"] = {
+        "reused_analysis_id": prior.analysis_id if prior else None,
+        "confirmed_subcategory_id": confirmed_subcategory,
+        "confirmed_authority_id": confirmed_authority_id,
+        "department_basis": basis,
+        "authority_id": authority_id,
+        "citizen_location": {k: v for k, v in vars(citizen).items() if v is not None},
+        "submitted_draft": submitted_draft,
     }
-
-    ai_desc = f"Detected: {category_labels.get(category, 'a civic issue')}."
-
     return {
-        "category": category,
-        "severity": severity,
-        "description": ai_desc,
-        "is_authentic": True  # Forgery detection stub — always passes for now
+        "category": sub["legacy_code"],
+        "subcategory_id": result.classification.subcategory_id,
+        "severity": result.classification.severity or sub["severity"],
+        "department": department,
+        "description": f"Detected: {sub['name_en']} ({result.classification.confidence:.0%} confidence).",
+        # Decided by the fake-image detector: from the reviewed analysis when it
+        # ran, otherwise by the verify_authenticity background task.
+        "is_authentic": not (result.authenticity or {}).get("flagged", False),
+        "civic_ai": civic,
     }
-
-
-# ── Legacy function name for backward compatibility ──────────────────────
-def analyze_image(image_path: str, description: str = "") -> dict:
-    """Backward-compatible wrapper. Prefer analyze_complaint() for new code."""
-    return analyze_complaint(description=description, image_path=image_path)
 
 
 # ── Text embedding stubs (for deduplication) ─────────────────────────────
 
+EMBEDDING_DIM = 384
+
+
 def get_text_embedding(text: str) -> list[float]:
     """
-    Returns a 384-dim pseudo-vector for deduplication.
-    Replace with IndicSBERT / sentence-transformers later.
+    384-dim hashed character 3-gram vector (L2-normalised) for deduplication.
+    Character n-grams tolerate typos, transliteration and mixed-language text
+    ("pothole"/"pot hole"/"potholes") without loading an ML model; IndicSBERT
+    can replace this later behind the same signature.
     """
-    random.seed(hash(text))
-    return [random.uniform(-1.0, 1.0) for _ in range(384)]
+    words = re.sub(r"[^\w\s]", " ", (text or "").lower()).split()
+    vec = [0.0] * EMBEDDING_DIM
+    for word in words:
+        padded = f" {word} "
+        for i in range(len(padded) - 2):
+            # crc32 is stable across processes (built-in hash() is randomised per run)
+            vec[zlib.crc32(padded[i:i + 3].encode()) % EMBEDDING_DIM] += 1.0
+    norm = sum(v * v for v in vec) ** 0.5
+    return [v / norm for v in vec] if norm else vec
 
 
 def compute_similarity(vec1: list[float], vec2: list[float]) -> float:

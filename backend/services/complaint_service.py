@@ -3,28 +3,37 @@ import uuid
 from backend.models.complaint import Complaint
 from backend.models.master_ticket import MasterTicket
 from backend.services.ai_service import analyze_complaint
-from backend.services.routing import get_department
 from backend.services.priority import calculate_priority, boost_priority
 from backend.services.deduplication import find_master_ticket
 from sqlalchemy.orm import Session
 from backend.database import SessionLocal
 from backend.services.pothole_detector import detect_potholes
 from backend.services.image_authenticity import assess
+from backend.ai import knowledge, pipeline
+from backend.ai.routing_engine import CitizenLocation
+from backend.ai.schema import AnalysisResult, EvidenceSource, VisualProblem
 
-def process_new_complaint(db: Session, user_id: str, description: str, images: list[str], lat: float, lon: float, location_source: str, captured_at: str | None = None) -> Complaint:
-    # 1. AI Analysis — classify from user description (+ image path for future use)
-    img_path = images[0] if images else None
-    ai_result = analyze_complaint(description=description, image_path=img_path)
+def process_new_complaint(db: Session, user_id: str, description: str, images: list[str], lat: float, lon: float,
+                          location_source: str, captured_at: str | None = None, image_bytes: list[bytes] | None = None,
+                          citizen: CitizenLocation | None = None, analysis_id: str | None = None,
+                          confirmed_subcategory: str | None = None, confirmed_authority_id: str | None = None,
+                          submitted_draft: str | None = None) -> Complaint:
+    # 1-2. Civic AI: classification (taxonomy) and routing (authority registry).
+    # Raises OutOfScopeComplaint / ValueError before anything is stored.
+    citizen = citizen or CitizenLocation(lat=lat, lon=lon)
+    ai_result = analyze_complaint(description, image_bytes, citizen, analysis_id=analysis_id,
+                                  confirmed_subcategory=confirmed_subcategory,
+                                  confirmed_authority_id=confirmed_authority_id, submitted_draft=submitted_draft)
 
     if captured_at:
         ai_result["captured_at"] = captured_at
 
-    category = ai_result.get("category", "other")
-    severity = ai_result.get("severity", 2)
-    is_auth = ai_result.get("is_authentic", True)
-    
-    # 2. Routing
-    department = get_department(category)
+    category = ai_result["category"]
+    severity = ai_result["severity"]
+    is_auth = ai_result["is_authentic"]
+    department = ai_result["department"]
+    if ai_result["civic_ai"].get("authenticity"):
+        ai_result["authenticity"] = ai_result["civic_ai"]["authenticity"]
     
     # 3. Priority Calculation
     # Assuming urgency is 2 by default, can be tweaked
@@ -99,9 +108,10 @@ def process_new_complaint(db: Session, user_id: str, description: str, images: l
 def verify_live_detection(complaint_id: str, image_bytes: bytes) -> None:
     """Background task: confirm a live-camera pothole report with the server model.
 
-    A confirmed detection overrides the text classifier (pothole, severity 3,
-    BBMP Roads); the result is stored in ai_analysis either way so admins can
-    see whether the on-device detection held up.
+    A confirmed detection is added as visual evidence and classification and
+    routing are re-run (unless the citizen chose the category themselves); the
+    result is stored in ai_analysis either way so admins can see whether the
+    on-device detection held up.
     """
     try:
         detection = detect_potholes(image_bytes)
@@ -117,13 +127,28 @@ def verify_live_detection(complaint_id: str, image_bytes: bytes) -> None:
         ai_result = json.loads(complaint.ai_analysis)
         ai_result["camera_detection"] = detection
         ai_result["camera_detection_verified"] = detection["detected"]
-        if detection["detected"]:
-            ai_result["category"] = "pothole"
-            ai_result["severity"] = 3
-            ai_result["description"] = "Detected: a road surface pothole (live camera)."
-            complaint.category = "pothole"
-            complaint.severity = 3
-            complaint.department = get_department("pothole")
+        civic = ai_result.get("civic_ai")
+        submission = (civic or {}).get("submission", {})
+        if detection["detected"] and civic and not submission.get("confirmed_subcategory_id"):
+            # Add the detector as visual evidence and re-run classification and
+            # routing; the citizen's own choices (if any) still take precedence.
+            prior = AnalysisResult.model_validate({k: v for k, v in civic.items() if k != "submission"})
+            if not any(p.source == EvidenceSource.pothole_detector for p in prior.image_analysis.problems):
+                prior.image_analysis.problems.append(VisualProblem(
+                    subcategory_id="ROAD.POTHOLE", source=EvidenceSource.pothole_detector,
+                    confidence=round(float(detection["max_confidence"]), 3),
+                    evidence=f"Pothole detector (live camera) found {detection['count']} pothole(s)"))
+                prior.image_analysis.detector = detection
+            result = pipeline.analyze([], complaint.description, CitizenLocation(**submission.get("citizen_location", {})),
+                                      run_vlm=False, run_detectors=False, prior=prior)
+            if result.classification.subcategory_id == "ROAD.POTHOLE":
+                sub = knowledge.subcategory("ROAD.POTHOLE")
+                ai_result["category"] = complaint.category = sub["legacy_code"]
+                ai_result["severity"] = complaint.severity = result.classification.severity or sub["severity"]
+                ai_result["description"] = "Detected: a road surface pothole (live camera)."
+                if not submission.get("confirmed_authority_id") and result.routing.authority_name:
+                    ai_result["department"] = complaint.department = result.routing.authority_name
+                ai_result["civic_ai"] = {**result.model_dump(mode="json"), "submission": submission}
         complaint.ai_analysis = json.dumps(ai_result)
         db.commit()
     finally:

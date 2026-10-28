@@ -29,6 +29,29 @@ def _authenticity(c):
     return {"verdict": a["verdict"], "flagged": a["flagged"], "reasons": a["reasons"]} if a else None
 
 
+def _civic_ai(c):
+    """What the reviewing official needs from the civic AI result."""
+    try:
+        civic = json.loads(c.ai_analysis or "{}").get("civic_ai")
+    except ValueError:
+        return None
+    if not civic:
+        return None
+    cls, routing, sub = civic["classification"], civic["routing"], civic.get("submission", {})
+    return {
+        "status": civic["status"],
+        "subcategory_id": cls["subcategory_id"],
+        "subcategory_name": cls["subcategory_name_en"],
+        "confidence": cls["confidence"],
+        "consistency": civic["fusion"]["consistency"],
+        "review_reasons": cls["review_reasons"],
+        "routing_status": routing["status"],
+        "authority_id": sub.get("authority_id"),
+        "department_basis": sub.get("department_basis"),
+        "citizen_draft": sub.get("submitted_draft"),
+    }
+
+
 @router.get("/complaints")
 def get_complaints(
     status: Optional[str] = None,
@@ -68,6 +91,7 @@ def get_complaints(
             "images": json.loads(c.images or "[]"),
             "is_authentic": c.is_authentic,
             "authenticity": _authenticity(c),
+            "civic_ai": _civic_ai(c),
         })
         
     return {
