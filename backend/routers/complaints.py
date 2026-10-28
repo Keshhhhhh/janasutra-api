@@ -178,6 +178,8 @@ def get_my_complaints(db: Session = Depends(get_db), current_user: User = Depend
             "status": c.status,
             "priority": c.priority,
             "category": c.category,
+            "department": c.department,
+            "images": json.loads(c.images or "[]"),
             "created_at": c.created_at.isoformat()
         } for c in complaints
     ]
