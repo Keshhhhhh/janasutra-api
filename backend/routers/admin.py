@@ -21,6 +21,14 @@ class ComplaintUpdate(BaseModel):
     status: Optional[str] = None
     priority: Optional[str] = None
 
+def _authenticity(c):
+    try:
+        a = json.loads(c.ai_analysis or "{}").get("authenticity")
+    except ValueError:
+        return None
+    return {"verdict": a["verdict"], "flagged": a["flagged"], "reasons": a["reasons"]} if a else None
+
+
 @router.get("/complaints")
 def get_complaints(
     status: Optional[str] = None,
@@ -56,7 +64,10 @@ def get_complaints(
             "status": c.status,
             "created_at": c.created_at.isoformat(),
             "location": {"lat": c.lat, "lon": c.lon},
-            "master_ticket_id": c.master_ticket_id
+            "master_ticket_id": c.master_ticket_id,
+            "images": json.loads(c.images or "[]"),
+            "is_authentic": c.is_authentic,
+            "authenticity": _authenticity(c),
         })
         
     return {

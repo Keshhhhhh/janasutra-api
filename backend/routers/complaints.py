@@ -8,7 +8,7 @@ from backend.database import get_db
 from backend.models.complaint import Complaint
 from backend.routers.auth import get_current_user
 from backend.models.user import User
-from backend.services.complaint_service import process_new_complaint, verify_live_detection
+from backend.services.complaint_service import process_new_complaint, verify_live_detection, verify_authenticity
 
 router = APIRouter()
 
@@ -32,6 +32,7 @@ async def create_complaint(
         raise HTTPException(status_code=400, detail="Maximum 5 images allowed")
 
     saved_images = []
+    image_bytes = []
     first_image_bytes = None
     for image in images:
         ext = image.filename.split(".")[-1] if "." in image.filename else "jpg"
@@ -42,6 +43,7 @@ async def create_complaint(
             f.write(content)
         if first_image_bytes is None:
             first_image_bytes = content
+        image_bytes.append(content)
         saved_images.append(f"/uploads/{filename}")
 
     complaint = process_new_complaint(
@@ -59,6 +61,12 @@ async def create_complaint(
     # client. Runs after the response: inference is slow on small CPU hosts.
     if live_detection and first_image_bytes:
         background_tasks.add_task(verify_live_detection, complaint.id, first_image_bytes)
+    # Real vs AI-generated / photo-of-a-screen / downloaded. Flags for admin
+    # review; never blocks. The first image of a live scan came from the camera.
+    background_tasks.add_task(
+        verify_authenticity, complaint.id,
+        [(content, live_detection and i == 0) for i, content in enumerate(image_bytes)],
+    )
 
     return {
         "ticket_id": complaint.ticket_id,

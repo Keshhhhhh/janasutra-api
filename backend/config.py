@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite:///./janasutra.db"
     POTHOLE_MODEL_PATH: str = "backend/ml_models/pothole.onnx"
     POTHOLE_CONF_THRESHOLD: float = 0.2
+    AUTHENTICITY_MODEL_PATH: str = "backend/ml_models/authenticity.onnx"
+    AUTHENTICITY_THRESHOLD: float = 0.761  # from training/runs/authenticity/eval_report.json (<=3% false flags on real val photos)
     # Comma-separated list of allowed browser origins, or "*"
     CORS_ORIGINS: str = "*"
     # Seeded account passwords — override via env in any public deployment

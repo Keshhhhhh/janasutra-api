@@ -9,6 +9,7 @@ from backend.services.deduplication import find_master_ticket
 from sqlalchemy.orm import Session
 from backend.database import SessionLocal
 from backend.services.pothole_detector import detect_potholes
+from backend.services.image_authenticity import assess
 
 def process_new_complaint(db: Session, user_id: str, description: str, images: list[str], lat: float, lon: float, location_source: str, captured_at: str | None = None) -> Complaint:
     # 1. AI Analysis — classify from user description (+ image path for future use)
@@ -124,6 +125,42 @@ def verify_live_detection(complaint_id: str, image_bytes: bytes) -> None:
             complaint.severity = 3
             complaint.department = get_department("pothole")
         complaint.ai_analysis = json.dumps(ai_result)
+        db.commit()
+    finally:
+        db.close()
+
+
+def verify_authenticity(complaint_id: str, images: list[tuple[bytes, bool]]) -> None:
+    """Background task: check each photo is a real capture.
+
+    images: (bytes, is_live_capture) per uploaded photo. The complaint is marked
+    is_authentic=False if any photo shows strong evidence of being AI-generated,
+    a photo of a screen, or a screenshot; reasons go to ai_analysis for admins.
+    """
+    results = []
+    for content, live in images:
+        try:
+            results.append(assess(content, live_capture=live))
+        except Exception as exc:
+            print(f"[verify_authenticity] {complaint_id}: assessment failed: {exc}")
+    if not results:
+        return
+
+    db = SessionLocal()
+    try:
+        complaint = db.query(Complaint).filter(Complaint.id == complaint_id).first()
+        if not complaint:
+            return
+        flagged = [r for r in results if not r["is_authentic"]]
+        ai_result = json.loads(complaint.ai_analysis)
+        ai_result["authenticity"] = {
+            "verdict": flagged[0]["verdict"] if flagged else "real",
+            "flagged": bool(flagged),
+            "reasons": sorted({reason for r in results for reason in r["reasons"]}),
+            "images": results,
+        }
+        complaint.ai_analysis = json.dumps(ai_result)
+        complaint.is_authentic = not flagged
         db.commit()
     finally:
         db.close()
